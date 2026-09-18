@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -80,12 +81,17 @@ func InstallClaudeHook(pluginRoot string) (string, error) {
 	}
 	settings["hooks"] = hooks
 
-	out, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
+	// Claude Code and other tools rewrite this file too; keep its text stable
+	// by not escaping HTML characters the way json.Marshal does by default.
+	var out bytes.Buffer
+	enc := json.NewEncoder(&out)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(settings); err != nil {
 		return "", err
 	}
 	tmp := settingsPath + ".herdr-spaces.tmp"
-	if err := os.WriteFile(tmp, append(out, '\n'), 0o600); err != nil {
+	if err := os.WriteFile(tmp, out.Bytes(), 0o600); err != nil {
 		return "", err
 	}
 	if err := os.Rename(tmp, settingsPath); err != nil {

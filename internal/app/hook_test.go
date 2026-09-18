@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -18,7 +19,7 @@ func TestInstallClaudeHookIsIdempotentAndKeepsOtherHooks(t *testing.T) {
 
 	configDir := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
-	existing := `{"model":"x","hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"other"}]}],"SubagentStop":[{"matcher":"Explore","hooks":[{"type":"command","command":"keep-me"}]}]}}`
+	existing := `{"model":"x","note":"a & b <c>","hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"other"}]}],"SubagentStop":[{"matcher":"Explore","hooks":[{"type":"command","command":"keep-me"}]}]}}`
 	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), []byte(existing), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -43,6 +44,9 @@ func TestInstallClaudeHookIsIdempotentAndKeepsOtherHooks(t *testing.T) {
 	}
 	if settings["model"] != "x" {
 		t.Error("unrelated settings must survive")
+	}
+	if !bytes.Contains(data, []byte(`"a & b <c>"`)) {
+		t.Errorf("HTML characters must not be escaped, got %s", data)
 	}
 	hooks := settings["hooks"].(map[string]any)
 	if n := len(hooks["SessionStart"].([]any)); n != 1 {
