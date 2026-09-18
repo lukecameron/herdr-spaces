@@ -1,0 +1,33 @@
+# Herdr Spaces plugin manifest.
+
+id = "lukecameron.spaces"
+name = "Spaces"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Agent counts and model-generated names for Herdr spaces"
+platforms = ["linux", "macos"]
+
+# Built at install time. Go is the only requirement.
+[[build]]
+command = ["go", "build", "-o", "herdr-spaces", "./cmd/herdr-spaces"]
+
+# The process stays alive itself: it polls the session and reports tokens.
+[[startup]]
+command = ["./herdr-spaces", "run"]
+
+[[actions]]
+id = "name-now"
+title = "Name this space now"
+contexts = ["workspace"]
+command = ["./herdr-spaces", "name-now"]
+
+[[actions]]
+id = "release"
+title = "Stop naming this space"
+contexts = ["workspace"]
+command = ["./herdr-spaces", "release"]
+
+[[actions]]
+id = "install-claude-hook"
+title = "Install the Claude Code subagent hook"
+command = ["./herdr-spaces", "install-claude-hook"]
