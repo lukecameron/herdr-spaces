@@ -146,28 +146,6 @@ func (c Context) Describe(includeLabel bool) string {
 	return b.String()
 }
 
-// IsDefaultLabel reports whether the label is one Herdr gave the workspace
-// itself, which it does from the directory name. Such a label carries no
-// intent from the user and may be replaced.
-func IsDefaultLabel(label string, dirs []string) bool {
-	l := normalize(label)
-	if l == "" {
-		return true
-	}
-	for _, d := range dirs {
-		if normalize(d) == l {
-			return true
-		}
-	}
-	return false
-}
-
-func normalize(s string) string {
-	s = strings.ToLower(strings.TrimSpace(s))
-	s = strings.NewReplacer("-", " ", "_", " ", ".", " ").Replace(s)
-	return strings.Join(strings.Fields(s), " ")
-}
-
 func sortedKeys(m map[string]bool) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {

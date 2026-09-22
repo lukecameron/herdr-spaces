@@ -9,9 +9,11 @@ Two things it adds to the Space sidebar:
 - **Agent counts.** Every Space gets `$agents`, `$working`, `$blocked`,
   `$subagents`, and `$agent_summary` tokens, kept current from the session
   every two seconds. Put the ones you want in your sidebar layout.
-- **Generated names.** On a ten minute cycle, Spaces that still carry the
-  directory name Herdr gave them, or a name this plugin wrote earlier, are sent
-  to Claude Code for a short label. A Space you named yourself is never touched.
+- **Generated names.** On a ten minute cycle, Spaces that were created while
+  the plugin was running and still carry the label they were born with, or that
+  this plugin named earlier, are sent to Claude Code for a short label. A Space
+  you named yourself is never touched, and neither is any Space that already
+  existed when the plugin started.
 
 Subagents are counted for Claude Code through a small hook, because Herdr
 cannot see them on its own. Other agents report zero subagents.
@@ -89,23 +91,32 @@ rows = [
 
 ## How naming works
 
-Every ten minutes the plugin reads the session and builds a short description
-of each Space: directory names, branches, tab labels, and what each agent is
-working on. A Space is considered when it has at least one agent and either
+Herdr does not record whether a label was typed by you or assigned from the
+directory name, so the plugin cannot tell a hand-picked `slate` from a default
+`slate`. It therefore only names a Space whose history it has watched:
 
-- its label is the directory name Herdr assigned, or
-- its label is one this plugin wrote and the description has changed.
+- **Born under the plugin.** A Space that appears while the plugin is running
+  has its label recorded at that moment. While the label is unchanged, the
+  Space is a candidate. The moment you rename it, it is yours for good.
+- **Named by the plugin.** After the plugin names a Space, it keeps the name in
+  step with the work as long as the label is still the one it wrote.
+- **Everything else is left alone.** Spaces that existed before the plugin
+  started, and Spaces you have renamed, are never touched by the automatic
+  pass. Use `name-now` if you want one of those named.
 
-The description goes to `claude -p` with a fixed system prompt asking for two
-to four words. The reply becomes the label. Names the plugin writes are
-remembered in its state directory; the moment a Space's label differs from the
-remembered one, the plugin treats it as yours and stops.
+Every ten minutes the plugin builds a short description of each candidate:
+directory names, branches, tab labels, and what each agent is working on. A
+Space is only sent to the model when it has at least one agent and its
+description has changed since it was last named. The description goes to
+`claude -p` with a fixed system prompt asking for two to four words, and the
+reply becomes the label. The plugin's own names, and the birth labels it is
+watching, live in `state.json` under its state directory.
 
 Two actions let you override that:
 
 ```sh
-herdr plugin action invoke lukecameron.spaces.name-now   # name the current Space, even if you named it
-herdr plugin action invoke lukecameron.spaces.release    # stop naming the current Space
+herdr plugin action invoke lukecameron.spaces.name-now   # name the current Space now, whatever its history
+herdr plugin action invoke lukecameron.spaces.release    # stop following the current Space
 ```
 
 Bind them like any plugin action:
@@ -118,9 +129,11 @@ command = "lukecameron.spaces.name-now"
 description = "name this space"
 ```
 
+`name-now` also puts the Space under the plugin's care, so later passes keep
+its name current until you rename it again.
+
 The model call uses your existing Claude Code login. It runs with no tools, no
-hooks, and no session persistence. A call takes a few seconds and happens only
-when a Space's description has changed since it was last named.
+hooks, and no session persistence, and takes a few seconds.
 
 ## Configuration
 

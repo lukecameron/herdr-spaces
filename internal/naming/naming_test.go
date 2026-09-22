@@ -1,6 +1,7 @@
 package naming
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -27,25 +28,6 @@ func TestSanitize(t *testing.T) {
 		got, ok := Sanitize(c.in)
 		if got != c.want || ok != c.ok {
 			t.Errorf("Sanitize(%q) = (%q, %v), want (%q, %v)", c.in, got, ok, c.want, c.ok)
-		}
-	}
-}
-
-func TestIsDefaultLabel(t *testing.T) {
-	dirs := []string{"dotfiles", "slate-reviewd"}
-	for label, want := range map[string]bool{
-		"dotfiles":            true,
-		"Dotfiles":            true,
-		"slate reviewd":       true,
-		"slate_reviewd":       true,
-		"":                    true,
-		"supervisor dev":      false,
-		"review #5547":        false,
-		"Dotfiles Ghostty":    false,
-		"Slate Reviewd Fixes": false,
-	} {
-		if got := IsDefaultLabel(label, dirs); got != want {
-			t.Errorf("IsDefaultLabel(%q) = %v, want %v", label, got, want)
 		}
 	}
 }
@@ -130,18 +112,49 @@ func TestStoreRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Update(func(m map[string]Owned) { m["w1"] = Owned{Name: "A", Fingerprint: "f"} }); err != nil {
+	if err := st.Update(func(s *State) { s.Owned["w1"] = Owned{Name: "A", Fingerprint: "f"}; s.Born["w3"] = "slate" }); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Update(func(m map[string]Owned) { delete(m, "missing"); m["w2"] = Owned{Name: "B"} }); err != nil {
+	if err := st.Update(func(s *State) { delete(s.Owned, "missing"); s.Owned["w2"] = Owned{Name: "B"} }); err != nil {
 		t.Fatal(err)
 	}
 	got, err := st.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got["w1"].Name != "A" || got["w2"].Name != "B" || len(got) != 2 {
-		t.Errorf("unexpected store contents %+v", got)
+	if got.Owned["w1"].Name != "A" || got.Owned["w2"].Name != "B" || len(got.Owned) != 2 {
+		t.Errorf("unexpected owned %+v", got.Owned)
+	}
+	if got.Born["w3"] != "slate" || len(got.Born) != 1 {
+		t.Errorf("unexpected born %+v", got.Born)
+	}
+}
+
+func TestStoreReadsLegacyOwnedFile(t *testing.T) {
+	dir := t.TempDir()
+	legacy := `{"w1":{"name":"Old Name","fingerprint":"abc"}}`
+	if err := os.WriteFile(filepath.Join(dir, "owned.json"), []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Owned["w1"].Name != "Old Name" || len(got.Born) != 0 {
+		t.Errorf("legacy load = %+v", got)
+	}
+	if err := st.Update(func(s *State) {}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "owned.json")); !os.IsNotExist(err) {
+		t.Error("legacy file should be removed after the first write")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "state.json")); err != nil {
+		t.Error("state.json should exist after the first write")
 	}
 }
 

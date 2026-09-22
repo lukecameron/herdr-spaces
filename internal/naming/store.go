@@ -19,8 +19,24 @@ type Owned struct {
 	Model       string    `json:"model,omitempty"`
 }
 
-// Store persists ownership in owned.json under the state directory. Actions
-// and the daemon both write it, so every update happens under a file lock.
+// State is everything the plugin remembers between runs.
+type State struct {
+	// Owned maps a workspace id to the name the plugin gave it.
+	Owned map[string]Owned `json:"owned"`
+	// Born maps a workspace id to the label it had when the plugin first saw
+	// it appear. Only a workspace that was created while the plugin was
+	// running, and still carries that label, is named automatically: Herdr
+	// does not record who set a label, so a workspace that already existed
+	// when the plugin started may have been named by hand and is left alone.
+	Born map[string]string `json:"born"`
+}
+
+func newState() State {
+	return State{Owned: map[string]Owned{}, Born: map[string]string{}}
+}
+
+// Store persists State in state.json under the state directory. Actions and
+// the daemon both write it, so every update happens under a file lock.
 type Store struct {
 	dir string
 }
@@ -33,27 +49,51 @@ func NewStore(dir string) (*Store, error) {
 	return &Store{dir: dir}, nil
 }
 
-func (s *Store) path() string { return filepath.Join(s.dir, "owned.json") }
+func (s *Store) path() string { return filepath.Join(s.dir, "state.json") }
 
-// Load reads the current ownership map.
-func (s *Store) Load() (map[string]Owned, error) {
+// Load reads the current state. A state file from version 0.1, which held
+// only the owned map, is read as such.
+func (s *Store) Load() (State, error) {
+	st := newState()
 	data, err := os.ReadFile(s.path())
 	if errors.Is(err, os.ErrNotExist) {
-		return map[string]Owned{}, nil
+		return s.loadLegacy(st)
 	}
 	if err != nil {
-		return nil, err
+		return st, err
 	}
-	out := map[string]Owned{}
-	if err := json.Unmarshal(data, &out); err != nil {
-		return nil, err
+	if err := json.Unmarshal(data, &st); err != nil {
+		return st, err
 	}
-	return out, nil
+	if st.Owned == nil {
+		st.Owned = map[string]Owned{}
+	}
+	if st.Born == nil {
+		st.Born = map[string]string{}
+	}
+	return st, nil
 }
 
-// Update applies fn to the ownership map under the lock and writes it back.
-func (s *Store) Update(fn func(map[string]Owned)) error {
-	lock, err := os.OpenFile(filepath.Join(s.dir, "owned.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+func (s *Store) loadLegacy(st State) (State, error) {
+	data, err := os.ReadFile(filepath.Join(s.dir, "owned.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return st, nil
+	}
+	if err != nil {
+		return st, err
+	}
+	if err := json.Unmarshal(data, &st.Owned); err != nil {
+		return st, err
+	}
+	if st.Owned == nil {
+		st.Owned = map[string]Owned{}
+	}
+	return st, nil
+}
+
+// Update applies fn to the state under the lock and writes it back.
+func (s *Store) Update(fn func(*State)) error {
+	lock, err := os.OpenFile(filepath.Join(s.dir, "state.lock"), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return err
 	}
@@ -63,13 +103,13 @@ func (s *Store) Update(fn func(map[string]Owned)) error {
 	}
 	defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) }()
 
-	owned, err := s.Load()
+	st, err := s.Load()
 	if err != nil {
 		return err
 	}
-	fn(owned)
+	fn(&st)
 
-	data, err := json.MarshalIndent(owned, "", "  ")
+	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -77,5 +117,9 @@ func (s *Store) Update(fn func(map[string]Owned)) error {
 	if err := os.WriteFile(tmp, append(data, '\n'), 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.path())
+	if err := os.Rename(tmp, s.path()); err != nil {
+		return err
+	}
+	_ = os.Remove(filepath.Join(s.dir, "owned.json"))
+	return nil
 }

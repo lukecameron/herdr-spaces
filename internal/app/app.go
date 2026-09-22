@@ -1,5 +1,6 @@
 // Package app wires the pieces together: the poll loop that reports agent
-// counts, the periodic naming pass, and the actions a user can invoke.
+// counts and watches for new spaces, the periodic naming pass, and the
+// actions a user can invoke.
 package app
 
 import (
@@ -18,13 +19,25 @@ import (
 	"github.com/lukecameron/herdr-spaces/internal/subagents"
 )
 
+// Session is the part of the Herdr API the app uses.
+type Session interface {
+	Snapshot(ctx context.Context) (herdr.Snapshot, error)
+	RenameWorkspace(ctx context.Context, workspaceID, label string) error
+	ReportWorkspaceTokens(ctx context.Context, workspaceID, source string, tokens map[string]*string, ttl time.Duration) error
+}
+
 // App holds what every command needs.
 type App struct {
 	Cfg    config.Config
-	Client *herdr.Client
+	Client Session
 	Store  *naming.Store
 	Namer  naming.Namer
 	Log    *slog.Logger
+	Branch func(dir string) string
+	subDir string
+	known  map[string]bool
+	primed bool
+	tokens map[string]reportedTokens
 }
 
 // New builds an App from the environment Herdr injects.
@@ -43,6 +56,8 @@ func New(cfg config.Config, log *slog.Logger) (*App, error) {
 		Store:  store,
 		Namer:  naming.ClaudeNamer{Bin: cfg.ClaudeBin, Model: cfg.Model, WorkDir: cfg.StateDir},
 		Log:    log,
+		Branch: newBranchLookup(),
+		subDir: cfg.SubagentDir,
 	}, nil
 }
 
@@ -62,14 +77,13 @@ func (a *App) Run(ctx context.Context) error {
 		naming = namingTimer.C
 	}
 
-	reported := map[string]reportedTokens{}
 	failures := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-poll.C:
-			if err := a.reportCounts(ctx, reported); err != nil {
+			if err := a.Poll(ctx); err != nil {
 				if ctx.Err() != nil {
 					return nil
 				}
@@ -94,29 +108,78 @@ type reportedTokens struct {
 	at     time.Time
 }
 
-// reportCounts reads one snapshot and pushes changed tokens. Unchanged tokens
-// are refreshed on a slower cadence with a TTL, so a dead plugin leaves no
-// stale counts behind.
-func (a *App) reportCounts(ctx context.Context, reported map[string]reportedTokens) error {
+// Poll reads one snapshot, records any space that has just appeared, and
+// pushes changed count tokens.
+func (a *App) Poll(ctx context.Context) error {
 	snap, err := a.Client.Snapshot(ctx)
 	if err != nil {
 		return err
 	}
+	a.recordBirths(snap)
+	return a.reportCounts(ctx, snap)
+}
+
+// recordBirths remembers the label of every space that appears after the
+// first poll. The first poll only learns what already exists: those spaces
+// may carry names the user chose, so they are never named automatically.
+func (a *App) recordBirths(snap herdr.Snapshot) {
+	if a.known == nil {
+		a.known = map[string]bool{}
+	}
+	var born []herdr.Workspace
+	live := map[string]bool{}
+	for _, w := range snap.Workspaces {
+		live[w.ID] = true
+		if !a.known[w.ID] {
+			a.known[w.ID] = true
+			if a.primed {
+				born = append(born, w)
+			}
+		}
+	}
+	for id := range a.known {
+		if !live[id] {
+			delete(a.known, id)
+		}
+	}
+	a.primed = true
+	if len(born) == 0 {
+		return
+	}
+	err := a.Store.Update(func(s *naming.State) {
+		for _, w := range born {
+			s.Born[w.ID] = w.Label
+		}
+	})
+	if err != nil {
+		a.Log.Warn("could not record new spaces", "err", err)
+		return
+	}
+	for _, w := range born {
+		a.Log.Info("new space", "workspace", w.ID, "label", w.Label)
+	}
+}
+
+// reportCounts pushes changed tokens. Unchanged tokens are refreshed on a
+// slower cadence with a TTL, so a dead plugin leaves no stale counts behind.
+func (a *App) reportCounts(ctx context.Context, snap herdr.Snapshot) error {
+	if a.tokens == nil {
+		a.tokens = map[string]reportedTokens{}
+	}
 	now := time.Now()
-	subs := subagents.Read(a.Cfg.SubagentDir, snap, now)
+	subs := subagents.Read(a.subDir, snap, now)
 	all := counts.Compute(snap, subs)
 
 	live := map[string]bool{}
 	for wsID, c := range all {
 		live[wsID] = true
 		tokens := counts.Tokens(c)
-		prev, seen := reported[wsID]
+		prev, seen := a.tokens[wsID]
 		if seen && counts.Equal(prev.tokens, tokens) && now.Sub(prev.at) < a.Cfg.TokenRefresh {
 			continue
 		}
 		if !seen && c.Agents == 0 {
-			// Nothing to show and nothing to clear.
-			reported[wsID] = reportedTokens{tokens: tokens, at: now}
+			a.tokens[wsID] = reportedTokens{tokens: tokens, at: now}
 			continue
 		}
 		if err := a.Client.ReportWorkspaceTokens(ctx, wsID, config.Source, tokens, a.Cfg.TokenTTL); err != nil {
@@ -125,28 +188,29 @@ func (a *App) reportCounts(ctx context.Context, reported map[string]reportedToke
 		if !seen || !counts.Equal(prev.tokens, tokens) {
 			a.Log.Debug("reported", "workspace", wsID, "counts", fmt.Sprintf("%+v", c))
 		}
-		reported[wsID] = reportedTokens{tokens: tokens, at: now}
+		a.tokens[wsID] = reportedTokens{tokens: tokens, at: now}
 	}
-	for wsID := range reported {
+	for wsID := range a.tokens {
 		if !live[wsID] {
-			delete(reported, wsID)
+			delete(a.tokens, wsID)
 		}
 	}
 	return nil
 }
 
 // NamingPass considers every eligible space, or only workspaceID when it is
-// set. force reclaims a space the user named by hand.
+// set. force names a space whatever its history, including one the user
+// named by hand.
 func (a *App) NamingPass(ctx context.Context, force bool, workspaceID string) error {
 	snap, err := a.Client.Snapshot(ctx)
 	if err != nil {
 		return err
 	}
-	owned, err := a.Store.Load()
+	state, err := a.Store.Load()
 	if err != nil {
 		return err
 	}
-	contexts := naming.Collect(snap, newBranchLookup())
+	contexts := naming.Collect(snap, a.Branch)
 
 	live := map[string]bool{}
 	for _, c := range contexts {
@@ -154,50 +218,90 @@ func (a *App) NamingPass(ctx context.Context, force bool, workspaceID string) er
 		if workspaceID != "" && c.WorkspaceID != workspaceID {
 			continue
 		}
-		a.consider(ctx, c, owned, force)
+		a.consider(ctx, c, state, force)
 	}
 
 	// Forget spaces that no longer exist.
-	return a.Store.Update(func(m map[string]naming.Owned) {
-		for id := range m {
+	return a.Store.Update(func(s *naming.State) {
+		for id := range s.Owned {
 			if !live[id] {
-				delete(m, id)
+				delete(s.Owned, id)
+			}
+		}
+		for id := range s.Born {
+			if !live[id] {
+				delete(s.Born, id)
 			}
 		}
 	})
 }
 
-func (a *App) consider(ctx context.Context, c naming.Context, owned map[string]naming.Owned, force bool) {
-	log := a.Log.With("workspace", c.WorkspaceID, "label", c.Label)
-	prev, isOwned := owned[c.WorkspaceID]
+// Eligibility is why a space may or may not be named automatically.
+type Eligibility string
 
-	if isOwned && prev.Name != c.Label {
-		log.Info("released: renamed by hand", "was", prev.Name)
-		_ = a.Store.Update(func(m map[string]naming.Owned) { delete(m, c.WorkspaceID) })
-		isOwned = false
-		if !force {
-			return
+const (
+	// EligibleOwned means the plugin named it and the work has changed.
+	EligibleOwned Eligibility = "owned"
+	// EligibleBorn means it appeared while the plugin ran and still has its
+	// creation label.
+	EligibleBorn Eligibility = "born"
+	// SkipRenamedByHand means the label is not one the plugin wrote or saw at
+	// creation, so the user chose it.
+	SkipRenamedByHand Eligibility = "named by hand"
+	// SkipUnchanged means the plugin named it and nothing has changed since.
+	SkipUnchanged Eligibility = "unchanged"
+	// SkipNoAgents means there is nothing to describe yet.
+	SkipNoAgents Eligibility = "no agents"
+	// SkipPreexisting means it existed before the plugin started, so its
+	// label may be the user's.
+	SkipPreexisting Eligibility = "existed before the plugin started"
+)
+
+// Eligible decides whether an automatic pass may name the space.
+func Eligible(c naming.Context, state naming.State) (Eligibility, bool) {
+	if owned, ok := state.Owned[c.WorkspaceID]; ok && owned.Name == c.Label {
+		if owned.Fingerprint == c.Fingerprint() {
+			return SkipUnchanged, false
 		}
+		if !c.HasAgents() {
+			return SkipNoAgents, false
+		}
+		return EligibleOwned, true
+	}
+	if _, ok := state.Owned[c.WorkspaceID]; ok {
+		return SkipRenamedByHand, false
+	}
+	born, ok := state.Born[c.WorkspaceID]
+	if !ok {
+		return SkipPreexisting, false
+	}
+	if born != c.Label {
+		return SkipRenamedByHand, false
+	}
+	if !c.HasAgents() {
+		return SkipNoAgents, false
+	}
+	return EligibleBorn, true
+}
+
+func (a *App) consider(ctx context.Context, c naming.Context, state naming.State, force bool) {
+	log := a.Log.With("workspace", c.WorkspaceID, "label", c.Label)
+	owned, isOwned := state.Owned[c.WorkspaceID]
+
+	if isOwned && owned.Name != c.Label {
+		log.Info("released: renamed by hand", "was", owned.Name)
+		_ = a.Store.Update(func(s *naming.State) { delete(s.Owned, c.WorkspaceID); delete(s.Born, c.WorkspaceID) })
+		isOwned = false
 	}
 	if !force {
-		if !c.HasAgents() {
-			log.Debug("skipped: no agents")
-			return
-		}
-		if !isOwned && !naming.IsDefaultLabel(c.Label, c.Dirs) {
-			log.Debug("skipped: named by hand")
-			return
-		}
-		if isOwned && prev.Fingerprint == c.Fingerprint() {
-			log.Debug("skipped: unchanged")
+		why, ok := Eligible(c, state)
+		if !ok {
+			log.Debug("skipped: " + string(why))
 			return
 		}
 	}
 
-	// A default label says nothing about the work, so the model is not asked
-	// to keep it. A name the plugin wrote, or one the user is reclaiming with
-	// force, is worth keeping when the work has not changed.
-	description := c.Describe(isOwned || (force && !naming.IsDefaultLabel(c.Label, c.Dirs)))
+	description := c.Describe(isOwned || force)
 	if strings.TrimSpace(description) == "" {
 		log.Debug("skipped: nothing to describe")
 		return
@@ -213,8 +317,7 @@ func (a *App) consider(ctx context.Context, c naming.Context, owned map[string]n
 		log.Warn("model reply unusable", "reply", strings.TrimSpace(raw))
 		return
 	}
-	fingerprint := c.Fingerprint()
-	record := naming.Owned{Name: label, Fingerprint: fingerprint, NamedAt: time.Now(), Model: a.Cfg.Model}
+	record := naming.Owned{Name: label, Fingerprint: c.Fingerprint(), NamedAt: time.Now(), Model: a.Cfg.Model}
 
 	if a.Cfg.DryRun {
 		log.Info("would rename", "to", label, "took", time.Since(started).Round(time.Millisecond))
@@ -222,7 +325,7 @@ func (a *App) consider(ctx context.Context, c naming.Context, owned map[string]n
 	}
 	if label == c.Label {
 		log.Info("kept", "took", time.Since(started).Round(time.Millisecond))
-		_ = a.Store.Update(func(m map[string]naming.Owned) { m[c.WorkspaceID] = record })
+		_ = a.Store.Update(func(s *naming.State) { s.Owned[c.WorkspaceID] = record })
 		return
 	}
 	if err := a.Client.RenameWorkspace(ctx, c.WorkspaceID, label); err != nil {
@@ -230,12 +333,12 @@ func (a *App) consider(ctx context.Context, c naming.Context, owned map[string]n
 		return
 	}
 	log.Info("renamed", "to", label, "took", time.Since(started).Round(time.Millisecond))
-	_ = a.Store.Update(func(m map[string]naming.Owned) { m[c.WorkspaceID] = record })
+	_ = a.Store.Update(func(s *naming.State) { s.Owned[c.WorkspaceID] = record })
 }
 
 // Release drops ownership of a space so the plugin stops renaming it.
 func (a *App) Release(workspaceID string) error {
-	return a.Store.Update(func(m map[string]naming.Owned) { delete(m, workspaceID) })
+	return a.Store.Update(func(s *naming.State) { delete(s.Owned, workspaceID); delete(s.Born, workspaceID) })
 }
 
 // newBranchLookup returns a memoized git branch reader.
