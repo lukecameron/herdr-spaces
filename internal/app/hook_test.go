@@ -38,6 +38,15 @@ func TestInstallClaudeHookIsIdempotentAndKeepsOtherHooks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A third install must not rewrite the file at all.
+	before, _ := os.Stat(filepath.Join(configDir, "settings.json"))
+	if _, err := InstallClaudeHook(root); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.Stat(filepath.Join(configDir, "settings.json"))
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Error("settings.json was rewritten although the hooks were already registered")
+	}
 	var settings map[string]any
 	if err := json.Unmarshal(data, &settings); err != nil {
 		t.Fatal(err)

@@ -60,6 +60,11 @@ func InstallClaudeHook(pluginRoot string) (string, error) {
 	if hooks == nil {
 		hooks = map[string]any{}
 	}
+	if registered(hooks, command) {
+		// Other tools manage this file too; rewriting it would only reorder
+		// their keys.
+		return dest, nil
+	}
 	for _, event := range hookEvents {
 		entries, _ := hooks[event].([]any)
 		entry := map[string]any{
@@ -98,6 +103,28 @@ func InstallClaudeHook(pluginRoot string) (string, error) {
 		return "", err
 	}
 	return dest, nil
+}
+
+// registered reports whether every event already runs exactly this command.
+func registered(hooks map[string]any, command string) bool {
+	for _, event := range hookEvents {
+		entries, _ := hooks[event].([]any)
+		found := false
+		for _, e := range entries {
+			m, _ := e.(map[string]any)
+			list, _ := m["hooks"].([]any)
+			for _, h := range list {
+				hm, _ := h.(map[string]any)
+				if cmd, _ := hm["command"].(string); cmd == command {
+					found = true
+				}
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 // mentionsHook reports whether a settings.json hook entry runs our script.
