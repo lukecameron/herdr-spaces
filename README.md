@@ -13,7 +13,9 @@ Two things it adds to the Space sidebar:
   the plugin was running and still carry the label they were born with, or that
   this plugin named earlier, are sent to Claude Code for a short label. A Space
   you named yourself is never touched, and neither is any Space that already
-  existed when the plugin started.
+  existed when the plugin started, nor one another tool opened for a worker
+  and marked with a `worker` token in its metadata, since that tool labels
+  it itself.
 
 Subagents are counted for Claude Code through a small hook, because Herdr
 cannot see them on its own. Other agents report zero subagents.

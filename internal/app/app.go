@@ -255,10 +255,17 @@ const (
 	// SkipPreexisting means it existed before the plugin started, so its
 	// label may be the user's.
 	SkipPreexisting Eligibility = "existed before the plugin started"
+	// SkipSupervisorWorker means supervisor opened the space for one of its
+	// workers and labelled it "└ <worker>" itself, ordered under the space
+	// that spawned it; a generated name would hide which worker it is.
+	SkipSupervisorWorker Eligibility = "a supervisor worker's space"
 )
 
 // Eligible decides whether an automatic pass may name the space.
 func Eligible(c naming.Context, state naming.State) (Eligibility, bool) {
+	if c.Worker != "" {
+		return SkipSupervisorWorker, false
+	}
 	if owned, ok := state.Owned[c.WorkspaceID]; ok && owned.Name == c.Label {
 		if owned.Fingerprint == c.Fingerprint() {
 			return SkipUnchanged, false
