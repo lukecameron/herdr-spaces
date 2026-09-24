@@ -207,6 +207,7 @@ func TestEligibilityReasons(t *testing.T) {
 		{ctx("q", "Renamed", true), SkipRenamedByHand, false},
 		{ctx("o", "Owned", true), EligibleOwned, true},
 		{ctx("o", "Changed", true), SkipRenamedByHand, false},
+		{func() naming.Context { c := ctx("b", "dir", true); c.Worker = "c7886"; return c }(), SkipSupervisorWorker, false},
 	}
 	for _, tc := range cases {
 		got, ok := Eligible(tc.c, state)
@@ -218,5 +219,28 @@ func TestEligibilityReasons(t *testing.T) {
 	state.Owned["o"] = naming.Owned{Name: "Owned", Fingerprint: unchanged.Fingerprint()}
 	if got, ok := Eligible(unchanged, state); got != SkipUnchanged || ok {
 		t.Errorf("unchanged owned space = (%s, %v)", got, ok)
+	}
+}
+
+// A space supervisor opens for one of its workers is labelled "└ <worker>"
+// and marked with a worker token; it keeps that label even though it was
+// born while the plugin ran and has agents in it.
+func TestSupervisorWorkerSpacesKeepTheirLabel(t *testing.T) {
+	sess := &fakeSession{snap: herdr.Snapshot{Workspaces: []herdr.Workspace{{ID: "w1", Label: "Conditions"}}}}
+	app, namer := newTestApp(t, sess)
+	ctx := context.Background()
+	if err := app.Poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	sess.snap.Workspaces = append(sess.snap.Workspaces, herdr.Workspace{ID: "w2", Label: "└ c7886", Tokens: map[string]string{"worker": "c7886", "parent": "w1"}})
+	sess.snap.Agents = []herdr.Agent{agentIn("w2")}
+	if err := app.Poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.NamingPass(ctx, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if namer.calls != 0 || sess.renames["w2"] != "" {
+		t.Fatalf("a supervisor worker's space was renamed: calls=%d renames=%v", namer.calls, sess.renames)
 	}
 }

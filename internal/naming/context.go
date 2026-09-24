@@ -22,6 +22,10 @@ type Context struct {
 	Branches    []string // unique branches, sorted
 	Tabs        []string // tab labels in tab order, position prefix removed
 	Agents      []string // "claude, working: <title>" per agent, in pane order
+	// Worker is the supervisor worker the space was opened for, from the
+	// "worker" token supervisor attaches with workspace metadata; "" for
+	// any other space. Supervisor labels those spaces itself.
+	Worker string
 }
 
 // tabPosition is the "1 · " prefix Auto Title puts in front of a tab label.
@@ -33,7 +37,7 @@ func Collect(s herdr.Snapshot, branch func(dir string) string) []Context {
 	byWorkspace := make(map[string]*Context, len(s.Workspaces))
 	var order []string
 	for _, w := range s.Workspaces {
-		byWorkspace[w.ID] = &Context{WorkspaceID: w.ID, Label: w.Label}
+		byWorkspace[w.ID] = &Context{WorkspaceID: w.ID, Label: w.Label, Worker: w.Tokens["worker"]}
 		order = append(order, w.ID)
 	}
 
