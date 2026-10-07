@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
@@ -259,12 +260,27 @@ const (
 	// workers and labelled it "└ <worker>" itself, ordered under the space
 	// that spawned it; a generated name would hide which worker it is.
 	SkipSupervisorWorker Eligibility = "a supervisor worker's space"
+	// SkipReviewdTab means reviewd opened the space for a PR review and named
+	// it after the PR. reviewd recognises its own spaces by that name, so it
+	// stops notifying in, and closing, a space whose name has changed.
+	SkipReviewdTab Eligibility = "a reviewd review's space"
 )
+
+// reviewdTab matches the names reviewd gives a review's space: "review #<pr>"
+// while it runs and "<outcome> · #<pr>" once it ends, each followed by
+// " · <ticket>" and " · <repo>" as reviewd adds them.
+var reviewdTab = regexp.MustCompile(`^(?:review #\d+|(?:done|dropped|merged|closed|abandoned|taken by .+?) · #\d+)(?: · |$)`)
+
+// IsReviewdTab reports whether a label is one reviewd gave a review's space.
+func IsReviewdTab(label string) bool { return reviewdTab.MatchString(strings.TrimSpace(label)) }
 
 // Eligible decides whether an automatic pass may name the space.
 func Eligible(c naming.Context, state naming.State) (Eligibility, bool) {
 	if c.Worker != "" {
 		return SkipSupervisorWorker, false
+	}
+	if IsReviewdTab(c.Label) {
+		return SkipReviewdTab, false
 	}
 	if owned, ok := state.Owned[c.WorkspaceID]; ok && owned.Name == c.Label {
 		if owned.Fingerprint == c.Fingerprint() {
