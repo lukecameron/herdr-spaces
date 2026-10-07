@@ -244,3 +244,67 @@ func TestSupervisorWorkerSpacesKeepTheirLabel(t *testing.T) {
 		t.Fatalf("a supervisor worker's space was renamed: calls=%d renames=%v", namer.calls, sess.renames)
 	}
 }
+
+// reviewd names a review's space after its PR and finds the space again by
+// that name, so the label is reviewd's to keep, whatever else the plugin
+// would infer from it.
+func TestReviewdTabNames(t *testing.T) {
+	for _, label := range []string{
+		"review #5938 · slate",
+		"review #5913 · SLATE-8129 · slate",
+		"review #5291",
+		"done · #5938 · slate",
+		"dropped · #5938 · slate",
+		"merged · #5938 · slate",
+		"closed · #5938 · slate",
+		"abandoned · #5938 · slate",
+		"taken by arthuroz · #5938 · slate",
+		"done · #5291",
+	} {
+		if !IsReviewdTab(label) {
+			t.Errorf("%q is a reviewd name and was not recognised", label)
+		}
+	}
+	for _, label := range []string{
+		"Slate Reviewd 5913",
+		"review domain stuff matt",
+		"Review #5938",
+		"review #",
+		"review #5938x",
+		"done #5938",
+		"done · 5938",
+		"approved · #5938 · slate",
+		"PR 5927 review",
+		"",
+	} {
+		if IsReviewdTab(label) {
+			t.Errorf("%q is not a reviewd name and was recognised", label)
+		}
+	}
+}
+
+func TestReviewdSpacesKeepTheirLabel(t *testing.T) {
+	sess := &fakeSession{snap: herdr.Snapshot{Workspaces: []herdr.Workspace{{ID: "w1", Label: "Conditions"}}}}
+	app, namer := newTestApp(t, sess)
+	ctx := context.Background()
+	if err := app.Poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	sess.snap.Workspaces = append(sess.snap.Workspaces,
+		herdr.Workspace{ID: "w2", Label: "review #5913 · SLATE-8129 · slate"},
+		herdr.Workspace{ID: "w3", Label: "done · #5938 · slate"},
+	)
+	sess.snap.Agents = []herdr.Agent{agentIn("w2"), agentIn("w3")}
+	if err := app.Poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.NamingPass(ctx, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if namer.calls != 0 || sess.renames["w2"] != "" || sess.renames["w3"] != "" {
+		t.Fatalf("a reviewd space was renamed: calls=%d renames=%v", namer.calls, sess.renames)
+	}
+	if got, ok := Eligible(naming.Context{WorkspaceID: "w2", Label: "review #5913 · SLATE-8129 · slate"}, naming.State{}); ok || got != SkipReviewdTab {
+		t.Fatalf("eligibility = (%s, %v), want (%s, false)", got, ok, SkipReviewdTab)
+	}
+}

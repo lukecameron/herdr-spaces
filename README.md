@@ -15,7 +15,10 @@ Two things it adds to the Space sidebar:
   you named yourself is never touched, and neither is any Space that already
   existed when the plugin started, nor one another tool opened for a worker
   and marked with a `worker` token in its metadata, since that tool labels
-  it itself.
+  it itself. A Space named the way reviewd names a PR review, `review #<pr>`
+  or `done · #<pr>` and the like, is left alone too: reviewd finds its
+  Spaces again by those names, and stops notifying in and closing one whose
+  name has changed.
 
 Subagents are counted for Claude Code through a small hook, because Herdr
 cannot see them on its own. Other agents report zero subagents.
